@@ -1,6 +1,10 @@
 
 from fastapi import FastAPI, HTTPException, Query
-
+from backend.sensors import (
+    simulate_sensor_series,
+    STATION,
+    SENSOR_NOISE
+)
 from backend.orbit import (
     list_satellites,
     get_state,
@@ -104,3 +108,67 @@ def summary():
         "propagation": "SGP4",
         "mode": "prototype"
     }
+
+@app.get("/api/sensors/config")
+def sensor_configuration():
+
+    return {
+        "station": STATION,
+        "noise_assumptions": SENSOR_NOISE,
+        "available_sensors": [
+            "lidar",
+            "radar",
+            "optical"
+        ],
+        "mode": "simulation"
+    }
+
+
+@app.get("/api/sensors/{norad_id}")
+def sensor_data(
+    norad_id: int,
+    duration: int = Query(
+        300, ge=30, le=900
+    ),
+    step: int = Query(
+        10, ge=5, le=60
+    ),
+    noise: float = Query(
+        1.0, ge=0.1, le=10.0
+    ),
+    dropout: str | None = None,
+    seed: int = Query(42, ge=0)
+):
+
+    allowed = [
+        None, "lidar", "radar", "optical"
+    ]
+
+    if dropout not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid dropout sensor"
+        )
+
+    try:
+
+        return simulate_sensor_series(
+            norad_id=norad_id,
+            duration_seconds=duration,
+            step_seconds=step,
+            noise_multiplier=noise,
+            dropout_sensor=dropout,
+            seed=seed
+        )
+
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Satellite not found"
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc)
+        ) from exc
