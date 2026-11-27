@@ -10,6 +10,7 @@ from backend.orbit import (
     get_state,
     get_trajectory
 )
+from backend.fusion import run_fusion
 
 app = FastAPI(
     title="CosmoTrack API",
@@ -168,6 +169,100 @@ def sensor_data(
         ) from exc
 
     except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc)
+        ) from exc
+
+@app.get("/api/fusion/{norad_id}")
+def fusion_data(
+    norad_id: int,
+
+    duration: int = Query(
+        300, ge=30, le=900
+    ),
+
+    step: int = Query(
+        10, ge=5, le=60
+    ),
+
+    noise: float = Query(
+        1.0, ge=0.1, le=10.0
+    ),
+
+    dropout: str | None = None,
+
+    seed: int = Query(
+        42, ge=0
+    )
+):
+
+    allowed = [
+        None,
+        "lidar",
+        "radar",
+        "optical"
+    ]
+
+    if dropout not in allowed:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid dropout sensor"
+        )
+
+    try:
+
+        return run_fusion(
+            norad_id=norad_id,
+            duration_seconds=duration,
+            step_seconds=step,
+            noise_multiplier=noise,
+            dropout_sensor=dropout,
+            seed=seed
+        )
+
+    except KeyError as exc:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Satellite not found"
+        ) from exc
+
+    except ValueError as exc:
+
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc)
+        ) from exc
+
+
+@app.get("/api/fusion/{norad_id}/metrics")
+def fusion_metrics(norad_id: int):
+
+    try:
+
+        result = run_fusion(norad_id)
+
+        return {
+            "id": norad_id,
+            "name": result["name"],
+            "algorithm": result["algorithm"],
+            "simulated": True,
+            "metrics": result["metrics"],
+            "measurement_updates":
+                result["measurement_updates"]
+        }
+
+    except KeyError as exc:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Satellite not found"
+        ) from exc
+
+    except ValueError as exc:
+
         raise HTTPException(
             status_code=422,
             detail=str(exc)
