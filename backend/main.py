@@ -23,6 +23,19 @@ from backend.anomaly import (
     FEATURE_NAMES,
     NORMAL_SIGMA
 )
+from backend.scheduler import (
+    generate_schedule,
+    predict_visibility,
+    calculate_priority,
+    PRIORITY_WEIGHTS,
+    SENSOR_CONFIG,
+    SENSOR_SETUP_SECONDS,
+    UNCERTAINTY_REFERENCE_KM
+)
+
+from datetime import datetime, timezone
+from functools import lru_cache
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -592,3 +605,335 @@ def anomaly_analyze(
             status_code=422,
             detail=str(exc)
         ) from exc
+
+# ==========================================
+# SCHEDULER RESPONSE CACHE
+# ==========================================
+
+@lru_cache(maxsize=8)
+def cached_schedule(
+    hours,
+    max_objects,
+    max_tasks,
+    mode,
+    include_fusion,
+    time_bucket
+):
+
+    return generate_schedule(
+
+        hours=hours,
+
+        max_objects=max_objects,
+
+        max_tasks=max_tasks,
+
+        mode=mode,
+
+        include_fusion=include_fusion,
+
+        start_time=datetime.fromtimestamp(
+            time_bucket * 300,
+            tz=timezone.utc
+        )
+    )
+
+
+def get_cached_schedule(
+    hours=6,
+    max_objects=10,
+    max_tasks=10,
+    mode="demo",
+    include_fusion=True
+):
+
+    # Recompute schedules every five minutes
+    # to avoid repeated expensive EKF runs.
+
+    time_bucket = int(
+        datetime.now(
+            timezone.utc
+        ).timestamp() // 300
+    )
+
+    return cached_schedule(
+
+        hours,
+
+        max_objects,
+
+        max_tasks,
+
+        mode,
+
+        include_fusion,
+
+        time_bucket
+    )
+
+
+# ==========================================
+# SCHEDULER CONFIGURATION
+# ==========================================
+
+@app.get("/api/scheduler/config")
+def scheduler_config():
+
+    return {
+
+        "algorithm":
+            "Weighted priority + greedy allocation",
+
+        "priority_weights":
+            PRIORITY_WEIGHTS,
+
+        "sensors":
+            SENSOR_CONFIG,
+
+        "sensor_setup_seconds":
+            SENSOR_SETUP_SECONDS,
+
+        "uncertainty_reference_km":
+            UNCERTAINTY_REFERENCE_KM,
+
+        "priority_range":
+            [0, 100],
+
+        "available_modes": [
+            "demo",
+            "catalogue"
+        ],
+
+        "simulated":
+            True,
+
+        "cache_duration_seconds":
+            300
+    }
+
+
+# ==========================================
+# GENERATE AUTONOMOUS SCHEDULE
+# ==========================================
+
+@app.get("/api/scheduler")
+def scheduler_plan(
+
+    hours: int = Query(
+        6, ge=1, le=24
+    ),
+
+    max_objects: int = Query(
+        10, ge=1, le=60
+    ),
+
+    max_tasks: int = Query(
+        10, ge=1, le=60
+    ),
+
+    mode: Literal[
+        "demo",
+        "catalogue"
+    ] = "demo",
+
+    include_fusion: bool = True
+):
+
+    return get_cached_schedule(
+
+        hours=hours,
+
+        max_objects=max_objects,
+
+        max_tasks=max_tasks,
+
+        mode=mode,
+
+        include_fusion=include_fusion
+    )
+
+
+# ==========================================
+# SCHEDULER SUMMARY
+# ==========================================
+
+@app.get("/api/scheduler/summary")
+def scheduler_summary():
+
+    result = get_cached_schedule()
+
+    return {
+
+        "algorithm":
+            result["algorithm"],
+
+        "mode":
+            result["mode"],
+
+        "simulated":
+            result["simulated"],
+
+        "planning_start":
+            result["planning_start"],
+
+        "planning_end":
+            result["planning_end"],
+
+        "total_candidates":
+            result["total_candidates"],
+
+        "total_scheduled":
+            result["total_scheduled"],
+
+        "total_unscheduled":
+            result["total_unscheduled"],
+
+        "priority_counts":
+            result["priority_counts"],
+
+        "urgent_coverage_percent":
+            result["urgent_coverage_percent"],
+
+        "schedule_success_percent":
+            result["schedule_success_percent"],
+
+        "sensor_utilisation":
+            result["sensor_utilisation"],
+
+        "validation":
+            result["validation"],
+
+        "warnings":
+            result["warnings"],
+
+        "highest_priority_target": (
+            result["candidates"][0]
+            if result["candidates"]
+            else None
+        ),
+
+        "next_observation": (
+            result["schedule"][0]
+            if result["schedule"]
+            else None
+        )
+    }
+
+
+# ==========================================
+# INDIVIDUAL SATELLITE VISIBILITY
+# ==========================================
+
+@app.get(
+    "/api/scheduler/visibility/{norad_id}"
+)
+def scheduler_visibility(
+
+    norad_id: int,
+
+    hours: int = Query(
+        6, ge=1, le=24
+    )
+):
+
+    try:
+
+        start_time = datetime.now(
+            timezone.utc
+        )
+
+        windows = predict_visibility(
+
+            norad_id,
+
+            start_time,
+
+            hours=hours
+        )
+
+        return {
+
+            "norad_id":
+                norad_id,
+
+            "planning_start":
+                start_time.isoformat(),
+
+            "planning_hours":
+                hours,
+
+            "total_windows":
+                len(windows),
+
+            "windows":
+                windows,
+
+            "simulated_sensor_limits":
+                True
+        }
+
+    except KeyError as exc:
+
+        raise HTTPException(
+
+            status_code=404,
+
+            detail="Satellite not found"
+
+        ) from exc
+
+
+# ==========================================
+# CUSTOM PRIORITY CALCULATION
+# ==========================================
+
+class PriorityInput(BaseModel):
+
+    conjunction: float = Field(
+        default=0.0,
+        ge=0,
+        le=1
+    )
+
+    anomaly: float = Field(
+        default=0.0,
+        ge=0,
+        le=1
+    )
+
+    uncertainty: float = Field(
+        default=0.0,
+        ge=0,
+        le=1
+    )
+
+    visibility: float = Field(
+        default=0.0,
+        ge=0,
+        le=1
+    )
+
+    urgency: float = Field(
+        default=0.0,
+        ge=0,
+        le=1
+    )
+
+
+@app.post("/api/scheduler/priority")
+def scheduler_priority(
+    observation: PriorityInput
+):
+
+    return calculate_priority(
+
+        conjunction=observation.conjunction,
+
+        anomaly=observation.anomaly,
+
+        uncertainty=observation.uncertainty,
+
+        visibility=observation.visibility,
+
+        urgency=observation.urgency
+    )
