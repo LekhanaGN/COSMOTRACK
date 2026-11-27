@@ -16,6 +16,15 @@ from backend.collision import (
     synthetic_encounter,
     RISK_THRESHOLDS
 )
+from backend.anomaly import (
+    analyze_observation,
+    evaluate_model,
+    run_anomaly_demo,
+    FEATURE_NAMES,
+    NORMAL_SIGMA
+)
+
+from pydantic import BaseModel, Field
 
 app = FastAPI(
     title="CosmoTrack API",
@@ -420,3 +429,166 @@ def conjunction_summary():
 
         "mode": "catalogue_prediction"
     }
+
+# ==========================================
+# ANOMALY CONFIGURATION
+# ==========================================
+
+@app.get("/api/anomalies/config")
+def anomaly_config():
+
+    return {
+        "model": "Isolation Forest",
+
+        "learning_type":
+            "Unsupervised machine learning",
+
+        "training_samples": 2000,
+
+        "n_estimators": 200,
+
+        "contamination": 0.02,
+
+        "features": [
+            {
+                "name": name,
+
+                "normal_noise_scale":
+                    float(sigma)
+            }
+
+            for name, sigma in zip(
+                FEATURE_NAMES,
+                NORMAL_SIGMA
+            )
+        ],
+
+        "decision_threshold": 0,
+
+        "score_is_probability": False,
+
+        "training_source":
+            "Simulated normal residuals"
+    }
+
+
+# ==========================================
+# MODEL PERFORMANCE
+# ==========================================
+
+@app.get("/api/anomalies/metrics")
+def anomaly_metrics(
+
+    samples: int = Query(
+        500, ge=100, le=5000
+    ),
+
+    anomaly_fraction: float = Query(
+        0.10, ge=0.01, le=0.50
+    ),
+
+    strength: float = Query(
+        8.0, ge=1.0, le=20.0
+    )
+):
+
+    return evaluate_model(
+        samples=samples,
+        anomaly_fraction=anomaly_fraction,
+        strength=strength
+    )
+
+
+# ==========================================
+# SATELLITE ANOMALY DEMO
+# ==========================================
+
+@app.get("/api/anomalies/demo")
+def anomaly_demo(
+
+    norad_id: int = 25544,
+
+    samples: int = Query(
+        120, ge=30, le=500
+    ),
+
+    step_seconds: int = Query(
+        10, ge=1, le=60
+    ),
+
+    strength: float = Query(
+        8.0, ge=1.0, le=20.0
+    )
+):
+
+    try:
+
+        return run_anomaly_demo(
+            norad_id=norad_id,
+            samples=samples,
+            step_seconds=step_seconds,
+            strength=strength
+        )
+
+    except KeyError as exc:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Satellite not found"
+        ) from exc
+
+    except ValueError as exc:
+
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc)
+        ) from exc
+
+
+# ==========================================
+# ANALYZE CUSTOM RESIDUAL OBSERVATION
+# ==========================================
+
+class AnomalyObservation(BaseModel):
+
+    position_residual_m: float = Field(
+        ge=0
+    )
+
+    velocity_residual_m_s: float = Field(
+        ge=0
+    )
+
+    lidar_residual_m: float
+
+    radar_residual_m: float
+
+    radar_range_rate_residual_m_s: float
+
+    optical_residual_deg: float = Field(
+        ge=0
+    )
+
+
+@app.post("/api/anomalies/analyze")
+def anomaly_analyze(
+    observation: AnomalyObservation
+):
+
+    try:
+
+        features = [
+            getattr(observation, name)
+            for name in FEATURE_NAMES
+        ]
+
+        return analyze_observation(
+            features
+        )
+
+    except ValueError as exc:
+
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc)
+        ) from exc
