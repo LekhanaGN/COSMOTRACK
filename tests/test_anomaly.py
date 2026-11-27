@@ -418,3 +418,61 @@ def test_single_feature_anomaly(feature_index):
 
     assert result["is_anomaly"] is True
     assert result["severity"] == "HIGH"
+
+def test_hybrid_performance():
+
+    from backend.anomaly import evaluate_model
+
+    metrics = evaluate_model()
+
+    ml_metrics = metrics["ml_only_metrics"]
+
+    assert metrics["recall"] >= ml_metrics["recall"]
+
+    assert (
+        metrics["confusion_matrix"]["false_negative"]
+        <= ml_metrics["confusion_matrix"]["false_negative"]
+    )
+
+
+def test_detection_source():
+
+    from backend.anomaly import analyze_observation
+
+    observation = [
+        120.0,
+        0.8,
+        150.0,
+        15.0,
+        0.3,
+        0.01
+    ]
+
+    result = analyze_observation(observation)
+
+    assert result["is_anomaly"] is True
+
+    assert result["statistical_detected"] is True
+
+    assert result["detection_source"] in [
+        "STATISTICAL_RESIDUAL",
+        "ML_AND_STATISTICAL"
+    ]
+
+
+def test_negative_magnitude():
+
+    import pytest
+
+    from backend.anomaly import analyze_observation
+
+    with pytest.raises(ValueError):
+
+        analyze_observation([
+            -100.0,
+            0.8,
+            5.0,
+            15.0,
+            0.3,
+            0.01
+        ])

@@ -1,4 +1,24 @@
+import os
+import logging
 
+from time import perf_counter
+
+from typing import Literal
+
+from fastapi import Request
+
+from fastapi.middleware.cors import CORSMiddleware
+
+from fastapi.responses import JSONResponse
+
+from backend.mission import (
+    get_mission_overview,
+    get_mission_alerts,
+    get_system_info,
+    APP_VERSION
+)
+
+from backend.cache import get_cache_stats
 from fastapi import FastAPI, HTTPException, Query
 from backend.sensors import (
     simulate_sensor_series,
@@ -40,10 +60,156 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 app = FastAPI(
+
     title="CosmoTrack API",
-    description="AI-Powered Space Domain Awareness",
-    version="0.2.0"
+
+    description=(
+        "Space Domain Awareness platform integrating "
+        "satellite tracking, simulated multi-sensor fusion, "
+        "conjunction assessment, hybrid anomaly detection "
+        "and autonomous observation scheduling."
+    ),
+
+    version=APP_VERSION
 )
+# ==========================================
+# CORS CONFIGURATION
+# ==========================================
+
+allowed_origins = [
+
+    origin.strip()
+
+    for origin in os.getenv(
+
+        "CORS_ORIGINS",
+
+        (
+            "http://localhost:3000,"
+            "http://127.0.0.1:3000,"
+            "http://localhost:5173,"
+            "http://127.0.0.1:5173"
+        )
+
+    ).split(",")
+
+    if origin.strip()
+]
+
+
+app.add_middleware(
+
+    CORSMiddleware,
+
+    allow_origins=allowed_origins,
+
+    allow_credentials=False,
+
+    allow_methods=[
+        "GET",
+        "POST",
+        "OPTIONS"
+    ],
+
+    allow_headers=["*"],
+
+    expose_headers=[
+        "X-Process-Time-Ms"
+    ]
+)
+
+# ==========================================
+# LOGGING
+# ==========================================
+
+logging.basicConfig(
+    level=logging.INFO
+)
+
+logger = logging.getLogger(
+    "cosmotrack"
+)
+
+
+# ==========================================
+# REQUEST PERFORMANCE MONITORING
+# ==========================================
+
+@app.middleware("http")
+async def monitor_requests(
+    request: Request,
+    call_next
+):
+
+    started = perf_counter()
+
+    response = await call_next(
+        request
+    )
+
+    elapsed_ms = (
+        perf_counter() - started
+    ) * 1000
+
+    response.headers[
+        "X-Process-Time-Ms"
+    ] = f"{elapsed_ms:.2f}"
+
+    logger.info(
+
+        "%s %s | %s | %.2f ms",
+
+        request.method,
+
+        request.url.path,
+
+        response.status_code,
+
+        elapsed_ms
+    )
+
+    return response
+
+
+# ==========================================
+# GLOBAL ERROR HANDLER
+# ==========================================
+
+@app.exception_handler(Exception)
+async def unexpected_error_handler(
+    request: Request,
+    exc: Exception
+):
+
+    logger.error(
+
+        "Unexpected error on %s",
+
+        request.url.path,
+
+        exc_info=(
+            type(exc),
+            exc,
+            exc.__traceback__
+        )
+    )
+
+    return JSONResponse(
+
+        status_code=500,
+
+        content={
+
+            "error":
+                "INTERNAL_SERVER_ERROR",
+
+            "message":
+                "An unexpected backend error occurred.",
+
+            "path":
+                request.url.path
+        }
+    )
 
 
 @app.get("/")
@@ -937,3 +1103,241 @@ def scheduler_priority(
 
         urgency=observation.urgency
     )
+
+# ==========================================
+# UNIFIED MISSION OVERVIEW
+# ==========================================
+
+@app.get(
+    "/api/mission/overview",
+    tags=["Mission Control"]
+)
+def mission_overview(
+
+    norad_id: int = Query(
+        25544,
+        ge=1
+    ),
+
+    hours: int = Query(
+        6,
+        ge=1,
+        le=24
+    ),
+
+    max_objects: int = Query(
+        10,
+        ge=1,
+        le=60
+    ),
+
+    mode: Literal[
+        "demo",
+        "catalogue"
+    ] = "demo",
+
+    include_fusion: bool = True
+):
+
+    try:
+
+        return get_mission_overview(
+
+            norad_id=norad_id,
+
+            hours=hours,
+
+            max_objects=max_objects,
+
+            mode=mode,
+
+            include_fusion=include_fusion
+        )
+
+    except KeyError as exc:
+
+        raise HTTPException(
+
+            status_code=404,
+
+            detail="Satellite not found"
+
+        ) from exc
+
+    except ValueError as exc:
+
+        raise HTTPException(
+
+            status_code=422,
+
+            detail=str(exc)
+
+        ) from exc
+
+
+# ==========================================
+# CENTRAL ALERT FEED
+# ==========================================
+
+@app.get(
+    "/api/mission/alerts",
+    tags=["Mission Control"]
+)
+def mission_alerts(
+
+    norad_id: int = Query(
+        25544,
+        ge=1
+    ),
+
+    hours: int = Query(
+        6,
+        ge=1,
+        le=24
+    ),
+
+    mode: Literal[
+        "demo",
+        "catalogue"
+    ] = "demo",
+
+    severity: Literal[
+        "CRITICAL",
+        "HIGH",
+        "MEDIUM",
+        "LOW"
+    ] | None = None,
+
+    category: Literal[
+        "CONJUNCTION",
+        "ANOMALY"
+    ] | None = None,
+
+    limit: int = Query(
+        100,
+        ge=1,
+        le=500
+    )
+):
+
+    try:
+
+        return get_mission_alerts(
+
+            norad_id=norad_id,
+
+            hours=hours,
+
+            mode=mode,
+
+            severity=severity,
+
+            category=category,
+
+            limit=limit
+        )
+
+    except KeyError as exc:
+
+        raise HTTPException(
+
+            status_code=404,
+
+            detail="Satellite not found"
+
+        ) from exc
+
+
+# ==========================================
+# SYSTEM INFORMATION
+# ==========================================
+
+@app.get(
+    "/api/system/info",
+    tags=["System"]
+)
+def system_info():
+
+    return get_system_info()
+
+
+# ==========================================
+# CACHE PERFORMANCE
+# ==========================================
+
+@app.get(
+    "/api/system/cache",
+    tags=["System"]
+)
+def system_cache():
+
+    return {
+
+        "status": "AVAILABLE",
+
+        "cache": get_cache_stats()
+    }
+
+
+# ==========================================
+# BACKEND READINESS
+# ==========================================
+
+@app.get(
+    "/api/system/ready",
+    tags=["System"]
+)
+def system_ready():
+
+    from backend.orbit import get_satellites
+
+    try:
+
+        satellites = get_satellites()
+
+        if not satellites:
+
+            return JSONResponse(
+
+                status_code=503,
+
+                content={
+
+                    "ready": False,
+
+                    "reason":
+                        "Orbital catalogue is empty"
+                }
+            )
+
+        return {
+
+            "ready": True,
+
+            "application":
+                "CosmoTrack",
+
+            "version":
+                APP_VERSION,
+
+            "catalogue_objects":
+                len(satellites),
+
+            "hardware_connected":
+                False
+        }
+
+    except Exception:
+
+        return JSONResponse(
+
+            status_code=503,
+
+            content={
+
+                "ready": False,
+
+                "reason":
+                    "Orbital catalogue unavailable"
+            }
+        )
